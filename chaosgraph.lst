@@ -1,0 +1,352 @@
+     1                                  ;	Executable name : chaosgraph
+     2                                  ;	Created date	: 02/10/2024
+     3                                  ;	Last update		: 02/15/2024
+     4                                  ;	Author			: Jeffrey Brown
+     5                                  ;	Description		: This will approximate Pierre François Verhulst's logistic function
+     6                                  ;					  and graph it onto a 379x94 terminal (max size of konsole terminal)
+     7                                  ;					  as a 360x80 graph. It uses floating point arithematic and a terminal
+     8                                  ;					  graphing style discussed by Jeff Duntemann in their book:
+     9                                  ;					    "Assembly Langauge Step by Step: Programming with Linux" 3rd Ed.
+    10                                  ;						chapter 11
+    11                                  ;                       this was made as a way to practice writing i386 and x87 assembly,
+    12                                  ;                       if you want to continue to work on this, the first thing that needs
+    13                                  ;                       to happen is a solid reformat and organization
+    14                                  ;
+    15                                  ;
+    16                                  
+    17                                  ;
+    18                                  ;
+    19                                  ;	Built using these commands:
+    20                                  ;
+    21                                  ;   sandbox: sandbox.o
+    22                                  ; 	ld -o sandbox sandbox.o -m elf_i386
+    23                                  ; sandbox.o: sandbox.asm
+    24                                  ; 	nasm -f elf -g -F dwarf sandbox.asm -l sandbox.lst
+    25                                  ;
+    26                                  ;
+    27                                  ;
+    28                                  
+    29                                  ; Rough cut:
+    30                                  ;
+    31                                  ; ; Needs to be moved to appropriate sections and possible macros assigned
+    32                                  ; ; simple things such as macros or initialed data should be taken care of
+    33                                  ; ; then floating point arithematic needs to be figured out
+    34                                  ;
+    35                                  ;
+    36                                  ; Logistic Equation:
+    37                                  ;                   x(n+1) = r*x(n)*[1-x(n)]
+    38                                  ;
+    39                                  ; ; two Xn values will be stored at a time.
+    40                                  ; ; X(n)   in eax, and
+    41                                  ; ; X(n+1) in ebx
+    42                                  
+    43                                  ;
+    44                                  ;
+    45                                  ;
+    46                                  ;
+    47                                  ;
+    48                                  ;
+    49                                  ;
+    50                                  ;
+    51                                  ;
+    52                                  ;                        REMINDER TO SELF: Figure out the weirdness with addressing EQU or dd or resd
+    53                                  ;
+    54                                  ;
+    55                                  ;
+    56                                  ;
+    57                                  ;
+    58                                  ;
+    59                                  ;
+    60                                  ;
+    61                                  ;
+    62                                  ;
+    63                                  ;
+    64                                  
+    65                                  
+    66                                  section .data
+    67                                  
+    68 00000000 6666663F                         r: dd 0.9
+    69 00000004 8D7A083C                      rinc: dd 0.00833
+    70 00000008 6666663F                        Xo: dd 0.9
+    71 0000000C 50000000                      Rows: dd ROWS
+    72 00000010 00000000                      Zero: dd 0.0
+    73                                  
+    74                                     NUPLOT   EQU 20
+    75                                     CONVITER EQU 100
+    76                                  
+    77                                  ;Terminal graphic information:
+    78                                  ;           Creating the graphing space to be printed onto a 379x94 terminal (max window size for Konsole)
+    79                                  ;               There will be a 360x81 graph, with the left-hand side filled with pipes "|"
+    80                                  ;               and the bottom filled with Box characters "─". The entire graph is 360 x 81 = 29160 ASCII characters long
+    81                                  ;               There will be a 5 line top margin, 10 line bottom margin, 5 space left margin, and a 14 space right margin
+    82                                  ;               top and bottom margins will be 'new line' characters (10), and left and right will be spaces (32)
+    83                                  ;               so each line of the  "graph" will be 379 characters long (5 for left margin, 360 for graph, 14 for right margin)
+    84                                  ;
+    85                                  ;               The entire string is 7 (top margin) + 30699 (379 x 81 = 30699) + 10 (bottom margin) = 30716 bytes long
+    86                                  
+    87                                  
+    88                                    LINESIZE    EQU 379
+    89                                    GRAPHSPACE  EQU 30699
+    90                                    GRAPHLENGTH EQU 360
+    91                                    TOPMARGIN   EQU 7
+    92                                    BTMMARGIN   EQU 7
+    93                                    LFTMARGIN   EQU 5
+    94                                    ROWS        EQU 80
+    95                                    ;Right Margin doesn't need to be calculated
+    96                                  
+    97                                  
+    98                                  
+    99                                  
+   100 00000014 90<rep Ch>              align 16                       ;FPU backups need to be aligned to 16bytes
+   101                                  section .bss
+   102                                  
+   103 00000000 <res 400h>                      FPUBackup:      resb 1024   ;place to save FPU
+   104                                  
+   105 00000400 <res 400h>                      Yaxis:          resb 1024        ;finished data converted to Yaxis value (stored as a list of 2-byte words)
+   106 00000800 ????????                        Xaxis:          resb 4           ;current position in Xaxis (increments each time r is increased)
+   107                                  
+   108 00000804 ????????                        Xn:             resd        1
+   109 00000808 ????????                        Xni:            resd        1
+   110                                  
+   111 0000080C <res 10000h>                    OutputString:   resb 65536      ;String to graph stored here
+   112 0001080C <res 40h>                       GraphStart:     resd 16         ;Location past the top margin stored here
+   113                                  
+   114                                  
+   115                                  section .text
+   116                                  
+   117                                  
+   118                                  ;-------------------------------------------------------------------------
+   119                                  ; CalculateX: 	Calculates X(0) through X(n) where n = ConvIter
+   120                                  ; UPDATED: 	02/10/2024
+   121                                  ; IN: 		The memory location of double float r-value in edi
+   122                                  ;           The memory lcoation to store Xn             in eax
+   123                                  ;           The memory location of double float Xo      in ebx
+   124                                  ;           The number of iterations for Xn             in ecx
+   125                                  ;
+   126                                  ;               OPTIONAL running CalculateX.calc with ecx set to 0
+   127                                  ;                         will calculate X(n+1) without modfying FPU registers or ecx
+   128                                  ;                               This requires st2 = 1,
+   129                                  ;                                             st1 = r,
+   130                                  ;                                             st0 = X(n)
+   131                                  ;                               loaded into the FPU registers
+   132                                  ; RETURNS:	X(n) in memory location eax
+   133                                  ;               OPTIONAL call of CalculateX.calc with ecx set to 0 returns:
+   134                                  ;                        X(n+1) in st0
+   135                                  ; MODIFIES: Nothing
+   136                                  ;               OPTIONAL call of CalculateX.calc with ecx set to 0 modifies:
+   137                                  ;                        FPU register st0
+   138                                  ;                        The FPU register will be loaded with one value,
+   139                                  ;                             make sure you have atleast 1 free register
+   140                                  ;                             (st1 through st4 will not be changed)
+   141                                  ; CALLS:	Nothing
+   142                                  ; DESCRIPTION:	Calculates X(n) ecx number of times and returns the final value to address ebx.
+   143                                  ;               Values beyond ecx can be calculated by calling CalculateX.calc,
+   144                                  ;               but some registers will be modified (see Optional information above)
+   145                                  
+   146                                  
+   147                                  
+   148                                  CalculateX:
+   149                                  ;         Calcuate Xn where n is the value in ecx
+   150 00000000 9BDBE3                          finit
+   151 00000003 D9E8                            fld1                   ;load 1 onto F7     (st2) (st3 during .calc line 2)
+   152 00000005 D907                            fld     dword [edi]      ;load r to F6     (st1)
+   153 00000007 D903                            fld     dword [ebx]     ;load Xo onto F5   (st0) (st1 and st0 during .calc lines 2 and 3)
+   154                                  
+   155 00000009 D9C0                    .calc:  fld      st0      ;duplicate st0 to st0 and st1 (both now equal Xn)
+   156 0000000B D8EB                            fsubr    st3      ;st0 = st3-st0 = 1-Xn
+   157 0000000D DEC9                            fmulp             ;st0 = st1*st0 = Xn*(1-Xn) (and st1 pops off, making st0 = Xn*(1-Xn))
+   158 0000000F D8C9                            fmul     st1      ;st0 = st0*st1 = Xn*(1-Xn)*r = X(n+1)
+   159                                  
+   160 00000011 83F901                          cmp   ecx,1
+   161 00000014 720C                            jb   .ret       ;if .calc was called with ecx = 0, run once
+   162                                                          ;    without modifying ecx or FPU registers
+   163 00000016 83E901                          sub   ecx,1     ;otherwise, decrement ecx
+   164 00000019 7402                            je   .home      ;when the last calcuation is done, go home
+   165                                  
+   166 0000001B EBEC                            jmp  .calc      ;otherwise, repeat for all of ecx (ecx = 100 will run 100 times)
+   167                                  
+   168                                  .home:
+   169 0000001D D918                            fstp  dword  [eax]        ;store the last X(n) value and pop it off the stack
+   170 0000001F 9BDBE3                          finit                     ;clear the FPU register stack
+   171 00000022 C3                      .ret:   ret                       ;and head on home
+   172                                  
+   173                                  
+   174                                  
+   175                                  
+   176                                  
+   177                                  
+   178                                  ;-----------------------------------------------------------------------------------------------------------------------------------------------------------
+   179                                  
+   180                                  
+   181                                  
+   182                                  
+   183                                  
+   184                                  DoAGraph:       ;setup the registers for memory calls by the FPU
+   185 00000023 B8[04080000]                            mov     eax, Xn
+   186 00000028 BB[08000000]                            mov     ebx, Xo
+   187 0000002D B964000000                              mov     ecx, CONVITER
+   188 00000032 BA[00040000]                            mov     edx, Yaxis
+   189 00000037 BE[0C000000]                            mov     esi, Rows
+   190 0000003C BF[00000000]                            mov     edi, r
+   191                                                  ;calculate Xn where n = CONVITER
+   192 00000041 E8BAFFFFFF              GrabSomeData:   call    CalculateX
+   193                                                  ;setup to calculate the next 20 values and scale them to size for the graph
+   194 00000046 31C9                                    xor     ecx, ecx    ;for the optional mode of CalculateX.calc
+   195 00000048 BB14000000                              mov     ebx, NUPLOT ;number of x(n+1) to plot for each r-value
+   196 0000004D 4B                                      dec     ebx         ;take a value and use it as an offset
+   197 0000004E A1[04080000]                            mov     eax, [Xn]
+   198 00000053 A3[08080000]                            mov     [Xni], eax
+   199 00000058 B8[08080000]                            mov     eax, Xni
+   200 0000005D 9BDBE3                  Converge:       finit
+   201 00000060 D9E8                                    fld1                     ;st2 = 1
+   202 00000062 D907                                    fld     dword [edi]      ;st1 = r
+   203 00000064 D900                                    fld     dword [eax]      ;st0 = Xni
+   204 00000066 E89EFFFFFF                              call    CalculateX.calc  ;st0 = Xn+1, st1 and st2 unaffected  (st1)
+   205 0000006B D910                                    fst     dword [eax]      ;save Xn+1
+   206 0000006D DB06                                    fild    dword [esi]      ;load size of Y-axis to FPU          (st0)
+   207 0000006F DEC9                                    fmulp                    ;multiply int by flt, pop int        (result in st0)
+   208 00000071 DF1C5A                                  fistp   word [edx+ebx*2] ;round the value down and store in memory as an interger, pop st0
+   209 00000074 83EB01                                  sub     ebx, 1
+   210 00000077 73E4                                    jnb     Converge
+   211 00000079 C3                                      ret
+   212                                  
+   213                                  
+   214 0000007A B914000000              GraphDots:      mov     ecx, NUPLOT           ;number of values in [edx]
+   215 0000007F 31DB                                    xor     ebx, ebx
+   216 00000081 49                                      dec     ecx                   ;use as an offset and a countdown
+   217 00000082 8B3D[0C080100]                          mov     edi, [GraphStart]
+   218 00000088 BE7B010000                 .plotdot:    mov     esi, LINESIZE
+   219 0000008D B850000000                              mov     eax, ROWS             ;load number of rows
+   220 00000092 668B9C09[00040000]                      mov     bx, word [Yaxis+ecx*2];grab a value to graph
+   221 0000009A 29D8                                    sub     eax, ebx              ;subtract value from 80 (without this the y-axis is reversed, the top is 0 and the bottom is 80)
+   222 0000009C 48                                      dec     eax                   ;use as an offset
+   223 0000009D F7E6                                    mul     esi                   ;eax now contains which line we are writing a dot to
+   224 0000009F 83C006                                  add     eax, LFTMARGIN+1      ;offset to X = 0 (without left margin or the space containing the axis "|" itself
+   225 000000A2 01F8                                    add     eax, edi              ;change this value to an address
+   226 000000A4 8B35[00080000]                          mov     esi, [Xaxis]
+   227 000000AA C60406DB                                mov     [esi+eax], byte 219    ;write an ASCII "."
+   228 000000AE 83E901                                  sub     ecx, 1
+   229 000000B1 73D5                                    jnc    .plotdot
+   230 000000B3 C3                                      ret
+   231                                  
+   232                                  
+   233                                  ;-----------------------------------------------------------------------------------------------------------------------------------------------------------
+   234                                  ;           Creating the graphing space to be printed onto a 379x94 terminal (max window size for Konsole)
+   235                                  ;               There will be a 360x81 graph, with the left-hand side filled with pipes "|"
+   236                                  ;               and the bottom filled with Box characters "─". The entire graph is 360 x 81 = 29160 ASCII characters long
+   237                                  ;               There will be a 5 line top margin, 10 line bottom margin, 5 space left margin, and a 14 space right margin
+   238                                  ;               top and bottom margins will be 'new line' characters (10), and left and right will be spaces (32)
+   239                                  ;               so each line of the  "graph" will be 379 characters long (5 for left margin, 360 for graph, 14 for right margin)
+   240                                  ;
+   241                                  ;               The entire string is 7 (top margin) + 30699 (379 x 81 = 30699) + 10 (bottom margin) = 30716 bytes long
+   242                                  
+   243                                  SetupGraph:
+   244 000000B4 60                                      pushad
+   245                                                  ;set the address where the graph string starts
+   246 000000B5 B8[0C080000]                            mov     eax, OutputString
+   247 000000BA 83C007                                  add     eax, TOPMARGIN
+   248 000000BD A3[0C080100]                            mov     [GraphStart], eax     ;set the address where the graph starts, i.e. the output + the top margin
+   249                                                  ;write new line characters for the top margin
+   250 000000C2 B80A000000                              mov     eax, 10               ;ASCII new line character
+   251 000000C7 BF[0C080000]                            mov     edi, OutputString
+   252 000000CC B907000000                              mov     ecx, TOPMARGIN        ;write new lines for the top margin
+   253 000000D1 FC                                      cld                           ;just to be safe
+   254 000000D2 F3AA                                    rep     stosb                 ;write the top margin to the string
+   255                                                  ;fill in the graph space will ASCII space characters
+   256 000000D4 B820000000                              mov     eax, 32               ;ASCII space
+   257 000000D9 8B3D[0C080100]                          mov     edi, [GraphStart]
+   258 000000DF B9EB770000                              mov     ecx, GRAPHSPACE       ;for every byte in the graph space,
+   259 000000E4 F3AA                                    rep     stosb                 ;write a space character
+   260                                                  ;fill in the pipe symbol to denote the y-axis
+   261 000000E6 8B3D[0C080100]                          mov     edi, [GraphStart]
+   262 000000EC C647057C                                mov     [edi+LFTMARGIN], byte 124     ;124 is ASCII pipe symbol "|"
+   263 000000F0 B87B010000                              mov     eax, LINESIZE                 ;379 char per line
+   264 000000F5 89C3                                    mov     ebx, eax                      ;extra copy of linesize for additions
+   265 000000F7 B94F000000                              mov     ecx, 79                       ;first line already has a pipe, last line will get a pipe (81-2=79)
+   266 000000FC C64407057C                     .Piper:  mov     [edi+eax+LFTMARGIN], byte 124 ;graphstart + size of one line + margin space
+   267 00000101 01D8                                    add     eax,ebx                       ;add the value of one line, i.e. go to next line in string
+   268 00000103 83E901                                  sub     ecx, 1
+   269 00000106 75F4                                    jne     .Piper                         ;repeat for all 79 lines
+   270                                                  ;fill in the x-axis with box character "─"
+   271 00000108 01C7                                    add     edi, eax         ;address needs to be in edi
+   272 0000010A 83C705                                  add     edi, LFTMARGIN   ;after the left margin
+   273 0000010D 47                                      inc     edi              ;one space after the y-axis
+   274 0000010E B8C4000000                              mov     eax, 196         ;Box character "─"
+   275 00000113 B968010000                              mov     ecx, GRAPHLENGTH ;the actual graph is 360 long
+   276 00000118 F3AA                                    rep     stosb
+   277                                                  ;fill in the bottom margin with end of line characters
+   278 0000011A 8B3D[0C080100]                          mov     edi, [GraphStart]
+   279 00000120 81C7EB770000                            add     edi, GRAPHSPACE
+   280 00000126 B80A000000                              mov     eax, 10         ;new line character
+   281 0000012B B907000000                              mov     ecx, BTMMARGIN
+   282 00000130 F3AA                                    rep     stosb
+   283 00000132 61                                      popad
+   284 00000133 C3                                      ret
+   285                                  
+   286                                  
+   287                                  ;-------------------------------------------------------------------------------------------------------------------------------------------
+   288                                          PrintGraph:
+   289 00000134 60                                      pushad		  ; Save all caller's GP registers
+   290 00000135 B804000000                              mov eax,4	  ; Specify sys_write call
+   291 0000013A BB01000000                              mov ebx,1	  ; Specify File Descriptor 1: Standard output
+   292 0000013F B9[0C080000]                            mov ecx,OutputString	  ; Pass offset of line string
+   293 00000144 BAF9770000                              mov edx,TOPMARGIN+GRAPHSPACE+BTMMARGIN	  ; Pass size of the line string
+   294 00000149 CD80                                    int 80h		  ; Make kernel call to display line string
+   295 0000014B 61                                      popad		  ; Restore all caller's GP registers
+   296                                  
+   297 0000014C B801000000                              Exit:	mov eax,1		; Code for Exit Syscall
+   298 00000151 BB00000000                              mov ebx,0		; Return a code of zero
+   299 00000156 CD80                                    int 80H			; Make kernel call
+   300                                  
+   301                                  
+   302                                  global _start
+   303                                  
+   304                                  _start:
+   305 00000158 90                                      nop
+   306                                  
+   307 00000159 E856FFFFFF                              call SetupGraph
+   308 0000015E E8C0FEFFFF                              call DoAGraph
+   309 00000163 E812FFFFFF                              call GraphDots
+   310 00000168 B968010000                              mov  ecx, 360
+   311 0000016D BD68010000                              mov  ebp, 360
+   312 00000172 9BDBE3                   NextR:          finit
+   313 00000175 D905[00000000]                           fld  dword [r]         ;st0
+   314 0000017B D905[04000000]                           fld dword [rinc]     ;result in st0
+   315 00000181 DEC1                                     faddp st1
+   316 00000183 D91D[00000000]                           fstp dword [r]
+   317 00000189 9BDBE3                                   finit
+   318 0000018C FF05[00080000]                           inc  dword [Xaxis]
+   319 00000192 51                                       push ecx
+   320 00000193 E88BFEFFFF                              call DoAGraph
+   321 00000198 E8DDFEFFFF                              call GraphDots
+   322 0000019D 59                                       pop  ecx
+   323 0000019E 83ED01                                   sub  ebp, 1
+   324 000001A1 83E901                                   sub  ecx, 1
+   325 000001A4 73CC                                     jnb  NextR
+   326 000001A6 E889FFFFFF                              call PrintGraph
+   327                                  
+   328                                  
+   329                                  
+   330                                  
+   331                                  
+   332                                  
+   333                                  
+   334                                  
+   335                                  
+   336                                  
+   337                                  
+   338                                  
+   339                                  
+   340                                  
+   341                                  
+   342                                  
+   343                                  
+   344                                  
+   345                                  
+   346                                  
+   347                                  ;               OPTIONAL running CalculateX.calc with ecx set to 0
+   348                                  ;                         will calculate X(n+1) without modfying FPU registers or ecx
+   349                                  ;                               This requires st2 = 1,
+   350                                  ;                                             st1 = r,
+   351                                  ;                                             st0 = X(n)
+   352                                  ;                               loaded into the FPU registers
