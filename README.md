@@ -8,4 +8,4 @@ which is the maximum size Konsole terminal for a 1920x1080 monitor.
 
 ## Graph output:
 
-
+![Chaos Graph](https://github.com/JeffreyDeanBrown/chaos_graph_asm/blob/master/images/chaosgraph_demo.png)
